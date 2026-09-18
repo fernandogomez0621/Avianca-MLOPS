@@ -1,0 +1,10 @@
+# El experimento MLflow NO vive aqui — esta declarado por target en databricks.yml
+# (experimentos solo en dev/qa, nunca prd)
+
+resources:
+  registered_models:
+    flight_delay_model_model_uc:
+      name: ${var.model_name}
+      catalog_name: ${var.catalog_name}
+      schema_name: ${var.schema_name}
+      comment: "flight_delay_model — ops/operaciones_flight_delay"

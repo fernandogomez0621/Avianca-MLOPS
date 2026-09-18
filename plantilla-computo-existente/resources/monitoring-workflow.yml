@@ -1,0 +1,49 @@
+# =============================================================================
+# monitoring-workflow.yml — Lakehouse Monitor para deteccion de drift
+# Requiere que la inference table exista (creada por batch-inference-workflow.yml)
+#
+# Activar en databricks.yml descomentando:
+#   - ./resources/monitoring-workflow.yml
+#
+# Metricas generadas automaticamente por Databricks:
+#   {schema}.{model_name}_inference_profile_metrics  — perfil estadistico de features
+#   {schema}.{model_name}_inference_drift_metrics    — drift entre ventanas temporales
+# =============================================================================
+
+resources:
+  quality_monitors:
+    flight_delay_model_monitor:
+      table_name: ${var.catalog_name}.${var.schema_name}.${var.model_name}_inference
+
+      # Directorio en workspace donde Databricks guarda dashboards del monitor
+      assets_dir: ${workspace.root_path}/monitors/${bundle.name}
+
+      # Schema donde se crean las tablas de metricas (_profile_metrics, _drift_metrics)
+      output_schema_name: ${var.catalog_name}.${var.schema_name}
+
+      inference_log:
+        problem_type:   PROBLEM_TYPE_CLASSIFICATION  # PROBLEM_TYPE_CLASSIFICATION o PROBLEM_TYPE_REGRESSION
+        # Columnas de la inference table (deben coincidir con BatchInference.py)
+        model_id_col:   model_uri    # identifica la version del modelo
+        prediction_col: prediction   # prediccion del modelo
+        timestamp_col:  scored_at    # fecha de scoring
+        granularities:
+          - "1 day"
+          - "1 week"
+        # Ground truth disponible en la misma tabla (demo). En operacion real el
+        # label puede llegar dias despues; el monitor lo recalcula al refrescar.
+        label_col: target
+
+      # baseline_table_name: ...
+      # Para InferenceLog el baseline debe tener el mismo schema que la inference table
+      # (con columnas prediction, model_uri, scored_at). La train table con features crudas
+      # no es compatible. El monitor detecta drift comparando ventanas temporales entre si.
+
+      # Segmentos criticos declarados, alineados con SLICE_THRESHOLDS
+      slicing_exprs:
+        - "carrier"
+        - "dep_hour >= 17 AND dep_hour <= 21"
+
+      # Schedule definido por target en databricks.yml:
+      #   dev/test/qa → sin schedule (ejecucion manual via run-refresh)
+      #   prod        → diario a las 6am (4h despues del batch scoring a las 2am)

@@ -1,0 +1,77 @@
+resources:
+  jobs:
+    flight_delay_model_training_job:
+      name: flight_delay_model_training_job_${bundle.target}
+
+      tasks:
+        - task_key: DataPreparation
+          existing_cluster_id: ${var.cluster_id}
+          timeout_seconds: 7200
+          notebook_task:
+            notebook_path: ../src/flight_delay_model/data_prep/notebooks/DataPreparation.py
+            base_parameters:
+              catalog: ${var.catalog_name}
+              schema: ${var.schema_name}
+              model_name: ${var.model_name}
+              experiment_name: ${workspace.root_path}/flight_delay_model
+              workspace_files_path: ${workspace.root_path}/files
+              # TODO: ajustar rango de fechas según el dominio del problema
+              date_from: "2020-01-01"
+              date_to: "2099-12-31"
+              test_ratio: "0.2"
+              # use_dummy eliminado: FeatureMaterialization es la unica fuente de datos.
+              # DataPreparation lee siempre desde la feature table (AP — fuente unica).
+
+        - task_key: Train
+          existing_cluster_id: ${var.cluster_id}
+          depends_on:
+            - task_key: DataPreparation
+          timeout_seconds: 10800
+          notebook_task:
+            notebook_path: ../src/flight_delay_model/training/notebooks/Train.py
+            base_parameters:
+              catalog: ${var.catalog_name}
+              schema: ${var.schema_name}
+              model_name: ${var.model_name}
+              experiment_name: ${workspace.root_path}/flight_delay_model
+              workspace_files_path: ${workspace.root_path}/files
+              run_mode: enabled
+              enable_hpo: "false"
+
+        - task_key: ModelValidation
+          existing_cluster_id: ${var.cluster_id}
+          depends_on:
+            - task_key: Train
+          timeout_seconds: 3600
+          notebook_task:
+            notebook_path: ../src/flight_delay_model/evaluation/notebooks/ModelValidation.py
+            base_parameters:
+              catalog: ${var.catalog_name}
+              schema: ${var.schema_name}
+              workspace_files_path: ${workspace.root_path}/files
+              run_mode: dry_run         # dry_run: registra veredicto pero no bloquea pipeline
+              # TODO: cambiar a "enabled" cuando los umbrales en thresholds.py estén calibrados
+              # con datos reales y el modelo supere los mínimos de producción.
+              enable_baseline_comparison: "true"
+
+        - task_key: ModelDeployment
+          existing_cluster_id: ${var.cluster_id}
+          depends_on:
+            - task_key: ModelValidation
+          timeout_seconds: 1800
+          notebook_task:
+            notebook_path: ../src/flight_delay_model/deployment/model_deployment/notebooks/notebook_promote.py
+            base_parameters:
+              catalog: ${var.catalog_name}
+              schema: ${var.schema_name}
+              model_name: ${var.model_name}
+              workspace_files_path: ${workspace.root_path}/files
+              register_only: "false"
+          # NOTA: el training solo corre en QA. El modelo se promueve a @champion aqui
+          # mismo en gold_adv_qa. El registro en PRD ya NO ocurre en este job — se hace
+          # en flight_delay_model_model_promotion_prd_job (target prod), disparado
+          # desde cd-scoring-pipeline tras la aprobacion manual. Esto evita que el SP de
+          # QA escriba en el catalogo PRD y evita crear artefactos en PRD sin gate.
+
+      timeout_seconds: 43200
+      max_concurrent_runs: 1

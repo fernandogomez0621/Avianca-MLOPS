@@ -1,0 +1,136 @@
+# =============================================================================
+# new-project-pipeline.yml — Inicializa un proyecto ML desde la plantilla
+# Proyecto : BPT ML Framework
+# =============================================================================
+# Uso: ejecutar manualmente en Azure DevOps con los parametros del proyecto.
+# El pipeline copia la plantilla, reemplaza los placeholders y abre una rama
+# project/{productName} lista para que el equipo empiece a desarrollar.
+#
+# Parametros:
+#   productName      : snake_case  (ej: churn_model)
+#   domain           : dominio de negocio (ej: retail)
+#   areaNegocio      : area dentro del dominio (ej: crm)
+#   proyecto         : nombre del proyecto ML (ej: churn_prediction)
+#   servicePrincipal : SP que usara el pipeline de CD (ej: sp-<dominio>-prd@<organizacion>)
+#   modelName        : nombre del modelo en UC — md_{area}_{subject} (ej: md_crm_churn)
+# =============================================================================
+
+trigger: none   # Solo ejecucion manual
+
+parameters:
+  - name: productName
+    displayName: "Nombre del bundle (snake_case, ej: churn_model)"
+    type: string
+
+  - name: domain
+    displayName: "Dominio de negocio (ej: retail)"
+    type: string
+
+  - name: areaNegocio
+    displayName: "Area de negocio (ej: crm)"
+    type: string
+
+  - name: proyecto
+    displayName: "Nombre del proyecto ML (ej: churn_prediction)"
+    type: string
+
+  - name: servicePrincipal
+    displayName: "Service principal de CD (ej: sp-<dominio>-prd@<organizacion>)"
+    type: string
+
+  - name: modelName
+    displayName: "Nombre del modelo UC — md_{area}_{subject} (ej: md_crm_churn)"
+    type: string
+
+variables:
+  # Nombre con guiones para variable groups de Azure DevOps
+  productNameDash: ${{ replace(parameters.productName, '_', '-') }}
+
+jobs:
+  - job: InitProject
+    displayName: "Inicializar proyecto ${{ parameters.productName }}"
+    pool:
+      vmImage: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout del repo con credenciales para poder hacer push ──────
+      - checkout: self
+        persistCredentials: true
+        fetchDepth: 0
+
+      # ── 2. Verificar que el proyecto no exista ya ─────────────────────────
+      - pwsh: |
+          $target = "projects/${{ parameters.productName }}"
+          if (Test-Path $target) {
+            Write-Error "ERROR: El proyecto '$target' ya existe en el repo. Elige otro nombre."
+            exit 1
+          }
+          Write-Host "OK: '$target' no existe — continuando."
+        displayName: Verificar que el proyecto no exista
+
+      # ── 3. Copiar la plantilla al directorio del nuevo proyecto ───────────
+      - pwsh: |
+          $source = "templates/ml-project-template"
+          $target = "projects/${{ parameters.productName }}"
+          Copy-Item -Path $source -Destination $target -Recurse
+          Write-Host "OK: plantilla copiada a '$target'"
+        displayName: Copiar plantilla
+
+      # ── 4. Ejecutar init.ps1 para reemplazar placeholders ─────────────────
+      - pwsh: |
+          Set-Location "projects/${{ parameters.productName }}"
+          .\init.ps1 `
+            -ProductName      "${{ parameters.productName }}" `
+            -Domain           "${{ parameters.domain }}" `
+            -AreaNegocio      "${{ parameters.areaNegocio }}" `
+            -Proyecto         "${{ parameters.proyecto }}" `
+            -ServicePrincipal "${{ parameters.servicePrincipal }}" `
+            -ModelName        "${{ parameters.modelName }}"
+        displayName: "Inicializar placeholders (init.ps1)"
+
+      # ── 5. Configurar git e ir a una rama nueva ───────────────────────────
+      - script: |
+          git config user.email "$(GIT_BOT_EMAIL)"
+          git config user.name  "$(GIT_BOT_NAME)"
+          git checkout -b project/${{ parameters.productName }}
+        displayName: Crear rama project/${{ parameters.productName }}
+
+      # ── 6. Commit del proyecto inicializado ───────────────────────────────
+      - script: |
+          git add projects/${{ parameters.productName }}/
+          git commit -m "feat(ml): inicializar proyecto ${{ parameters.productName }}
+
+          Generado con new-project-pipeline desde templates/ml-project-template.
+          Dominio   : ${{ parameters.domain }}
+          Area      : ${{ parameters.areaNegocio }}
+          Proyecto  : ${{ parameters.proyecto }}
+          Modelo UC : ${{ parameters.modelName }}"
+        displayName: Commit del proyecto
+
+      # ── 7. Push de la rama al repo ────────────────────────────────────────
+      - script: |
+          git push origin project/${{ parameters.productName }}
+        displayName: Push rama al repo
+
+      # ── 8. Mostrar resumen ────────────────────────────────────────────────
+      - pwsh: |
+          Write-Host ""
+          Write-Host "════════════════════════════════════════════════════"
+          Write-Host "  Proyecto creado exitosamente"
+          Write-Host "════════════════════════════════════════════════════"
+          Write-Host "  Bundle     : ${{ parameters.productName }}"
+          Write-Host "  Rama       : project/${{ parameters.productName }}"
+          Write-Host "  Directorio : projects/${{ parameters.productName }}/"
+          Write-Host ""
+          Write-Host "  Proximos pasos:"
+          Write-Host "  1. Revisa la rama en Azure Repos"
+          Write-Host "  2. El Data Scientist clona la rama y empieza a desarrollar"
+          Write-Host "  3. Verifica que existan los variable groups compartidos en Azure DevOps Library:"
+          Write-Host "     · mlops-vg-ci      (workspace QA/Test)"
+          Write-Host "     · mlops-vg-staging (workspace Staging)"
+          Write-Host "     · mlops-vg-prd     (workspace Produccion)"
+          Write-Host "  4. Registra los 2 pipelines apuntando a:"
+          Write-Host "     · projects/${{ parameters.productName }}/azure-pipelines/ci-pipeline.yml"
+          Write-Host "     · projects/${{ parameters.productName }}/azure-pipelines/cd-pipeline.yml"
+          Write-Host "════════════════════════════════════════════════════"
+        displayName: Resumen del proyecto creado

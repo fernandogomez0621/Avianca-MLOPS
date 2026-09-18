@@ -1,0 +1,26 @@
+# =============================================================================
+# agent-workflow.yml — Agente de negocio sobre el modelo gobernado
+#
+# Expone el @champion y su tabla de inferencia como herramientas consultables
+# en lenguaje natural. Solo lectura: no entrena, no promueve, no escribe.
+#
+# El ambiente consultado es un parametro del target, igual que el resto del
+# bundle: el agente de dev consulta dev, el de prod consulta prod.
+# =============================================================================
+
+resources:
+  jobs:
+    flight_delay_model_business_agent_job:
+      name: flight_delay_model_business_agent_job_${bundle.target}
+
+      tasks:
+        - task_key: BusinessAgent
+          timeout_seconds: 1800
+          notebook_task:
+            notebook_path: ../src/flight_delay_model/agent/notebooks/BusinessAgent.py
+            base_parameters:
+              catalog:    ${var.catalog_name}
+              schema:     ${var.schema_name}
+              model_name: ${var.model_name}
+
+      max_concurrent_runs: 1

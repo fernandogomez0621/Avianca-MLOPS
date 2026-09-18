@@ -1,0 +1,120 @@
+bundle:
+  name: flight_delay_model
+
+variables:
+  model_name:
+    description: Nombre del modelo en Unity Catalog (patron md_{area}_{subject}).
+    default: md_operaciones_flight
+  catalog_name:
+    description: Catalogo ML por ambiente (patron gold_adv_{ambiente}).
+  schema_name:
+    description: Schema dentro del catalogo ({area_negocio}_{proyecto}).
+    default: operaciones_flight_delay
+  qa_catalog_name:
+    description: Catalogo QA, origen del @champion validado para la promocion a PRD.
+    default: gold_adv_qa
+  qa_schema_name:
+    description: Schema QA, origen del @champion validado.
+    default: operaciones_flight_delay
+  use_dummy:
+    description: Datos sinteticos en lugar de tabla fuente real.
+    default: "true"
+  service_principal_prd:
+    description: Service principal que ejecuta los jobs en PRD (creado por el equipo de plataforma).
+    default: "TODO_SP_PRD"
+  cluster_id:
+    description: >
+      Cluster existente para los jobs del ciclo. El computo es un parametro del
+      target, no una decision de arquitectura: para ejecutar en serverless basta
+      con omitir existing_cluster_id en los tasks.
+  materialization_cluster_id:
+    description: >
+      Cluster dedicado NO-ML para feature materialization (los runtimes ML no lo
+      soportan). Un solo valor para todos los ambientes.
+    default: "TODO_CLUSTER_ID_MATERIALIZATION"
+
+sync:
+  include:
+    - src/**
+
+include:
+  - ./resources/model-training-workflow.yml
+  - ./resources/batch-inference-workflow.yml
+  - ./resources/feature-materialization-workflow.yml
+  - ./resources/monitoring-workflow.yml
+  # Job de promocion QA -> PRD. Se declara para todos los targets pero solo
+  # tiene sentido ejecutarlo en prod, detras del gate de aprobacion manual.
+  - ./resources/model-promotion-prd-workflow.yml
+  - ./resources/agent-workflow.yml
+
+targets:
+  dev:
+    default: true
+    variables:
+      catalog_name: gold_adv_dev
+      schema_name: operaciones_flight_delay
+      cluster_id: "TODO_CLUSTER_ID_DEV"
+    workspace:
+      host: https://<workspace-host>
+      root_path: /analitica/<dominio>/${bundle.name}/${bundle.target}
+    resources:
+      experiments:
+        flight_delay_model_experiment:
+          name: ${workspace.root_path}/flight_delay_model
+      jobs:
+        flight_delay_model_batch_scoring_job:
+          schedule:
+            pause_status: PAUSED
+      registered_models:
+        flight_delay_model_model_uc:
+          name: ${var.model_name}
+          catalog_name: ${var.catalog_name}
+          schema_name: ${var.schema_name}
+          comment: "flight_delay_model — ops/operaciones"
+
+  qa:
+    variables:
+      catalog_name: gold_adv_qa
+      schema_name: operaciones_flight_delay
+      cluster_id: "TODO_CLUSTER_ID_QA"
+    workspace:
+      host: https://<workspace-host>
+      root_path: /analitica/<dominio>/${bundle.name}/${bundle.target}
+    resources:
+      experiments:
+        flight_delay_model_experiment:
+          name: ${workspace.root_path}/flight_delay_model
+      jobs:
+        flight_delay_model_batch_scoring_job:
+          schedule:
+            pause_status: PAUSED
+      registered_models:
+        flight_delay_model_model_uc:
+          name: ${var.model_name}
+          catalog_name: ${var.catalog_name}
+          schema_name: ${var.schema_name}
+          comment: "flight_delay_model — ops/operaciones"
+
+  # PRD: sin experimento y sin registered_models declarado.
+  # El modelo llega por copy_model_version desde QA, tras aprobacion manual.
+  prod:
+    mode: production
+    variables:
+      catalog_name: gold_adv_prd
+      schema_name: operaciones_flight_delay
+      cluster_id: "TODO_CLUSTER_ID_PRD"
+    workspace:
+      host: https://<workspace-host>
+      root_path: /analitica/<dominio>/${bundle.name}/${bundle.target}
+    run_as:
+      service_principal_name: ${var.service_principal_prd}
+    permissions:
+      - group_name: <grupo-owner>
+        level: CAN_MANAGE
+      - group_name: <grupo-consumidor>
+        level: CAN_VIEW
+    resources:
+      jobs:
+        flight_delay_model_batch_scoring_job:
+          schedule:
+            pause_status: PAUSED

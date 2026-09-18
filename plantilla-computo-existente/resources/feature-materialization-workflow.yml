@@ -1,0 +1,30 @@
+resources:
+  jobs:
+    flight_delay_model_feature_materialization_job:
+      name: flight_delay_model_feature_materialization_job_${bundle.target}
+
+      # Ejecutar antes del job de training para que las features estén listas
+      # TODO: ajustar la frecuencia según la cadencia de actualización de datos fuente
+      trigger:
+        pause_status: PAUSED   # activar cuando existan tablas fuente reales
+        periodic:
+          interval: 1
+          unit: DAYS
+
+      tasks:
+        - task_key: FeatureMaterialization
+          existing_cluster_id: ${var.materialization_cluster_id}
+          timeout_seconds: 3600
+          notebook_task:
+            notebook_path: ../src/flight_delay_model/features/notebooks/FeatureMaterialization.py
+            base_parameters:
+              catalog: ${var.catalog_name}
+              schema: ${var.schema_name}
+              workspace_files_path: ${workspace.root_path}/files
+              start_date: ""             # vacío = 90 días atrás (default del notebook)
+              end_date: ""               # vacío = hoy (default del notebook)
+              use_dummy: ${var.use_dummy}   # "true" en dev/qa, "false" en prod (ver databricks.yml)
+              dummy_rows: "500"
+
+      timeout_seconds: 7200
+      max_concurrent_runs: 1

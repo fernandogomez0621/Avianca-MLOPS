@@ -1,0 +1,11 @@
+product: flight_delay_model
+domain: ops
+area_negocio: operaciones
+proyecto: flight_delay
+version: "0.1.0"
+catalog_dev: gold_adv_dev
+catalog_qa: gold_adv_qa
+catalog_prd: gold_adv_prd
+experiment_path: /ml/ops/operaciones/flight_delay
+model_name: md_operaciones_flight
+service_principal: SERVICE_PRINCIPAL

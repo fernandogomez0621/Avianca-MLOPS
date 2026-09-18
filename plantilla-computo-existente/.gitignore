@@ -1,0 +1,34 @@
+# Python packaging artifacts (generados por pip install -e .)
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Pytest / Ruff cache
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.pyo
+.coverage
+htmlcov/
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# MLflow local runs (en Databricks se guardan en el tracking server)
+mlruns/
+mlartifacts/
+
+# Databricks Bundle outputs
+.databricks/
+
+# Evidencia de evaluación (generada en runtime, no versionable)
+openspec/changes/current/evidence/
+
+# IDEs
+.idea/
+.vscode/
+*.iml

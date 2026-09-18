@@ -1,0 +1,20 @@
+# Pipeline CI para flight_delay_model
+# Nombre en Azure DevOps: flight_delay_model-ci
+# La logica completa vive en framework/pipelines/ci-template.yml
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+
+extends:
+  template: ../framework/pipelines/ci-template.yml
+  parameters:
+    bundleName: flight_delay_model
+    trainingJob: flight_delay_model_training_job
+    featureMaterializationJob: flight_delay_model_feature_materialization_job
+    ciVariableGroup: mlops-vg-ci
+    databricksClientId: SERVICE_PRINCIPAL
+    registeredModel: gold_adv_dev.operaciones_flight_delay.md_operaciones_flight

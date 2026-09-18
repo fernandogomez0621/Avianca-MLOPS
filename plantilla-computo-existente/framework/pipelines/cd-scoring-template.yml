@@ -1,0 +1,192 @@
+# =============================================================================
+# cd-scoring-template.yml — Pipeline CD de scoring + monitor (Opcion C: branch-gated)
+# Proyecto : flight_delay_model — BPT
+# =============================================================================
+# Responsabilidad: promover el @champion certificado de QA a PRD (aprobacion
+# manual), materializar features en PRD, ejecutar batch scoring y activar el
+# quality monitor en PRD.
+#
+# Flujo:
+#   DeployPrd                    → aprobacion manual → bundle deploy prod (sin monitor — markers intactos)
+#                                   + promocion @champion QA->PRD (copy_model_version)
+#   RunFeatureMaterializationPrd → materializa features en prod con datos reales
+#   RunScoringPrd                → scoring prod crea _inference prod → enable monitor → redeploy prod con monitor
+#
+# Prerequisito: cd-training-pipeline debe haber completado exitosamente y negocio
+# debe haber certificado el modelo en QA (scoring + monitor QA, activados en el
+# Stage 4 de cd-training-pipeline) ANTES de mergear a la rama release.
+# Se dispara con push/merge a release — no depende de ningun evento de otro pipeline.
+#
+# Parametros requeridos:
+#   bundleName                  : nombre del bundle DAB
+#   featureMaterializationJob   : nombre del job de feature materialization en el bundle
+#   batchScoringJob             : nombre del job de batch scoring en el bundle
+#   modelPromotionPrdJob        : job que copia el @champion de QA a PRD (corre en Stage DeployPrd,
+#                                 tras la aprobacion manual, con el SP de prod — no el de QA)
+#   databricksClientId : Application ID (client ID) del Service Principal en Microsoft Entra ID
+#                  Es el mismo SP registrado en Databricks Account Console (azure-devops-oidc)
+#   prdVariableGroup            : variable group de prd    (DATABRICKS_HOST)
+#   prdEnvironment              : nombre del entorno ADO con aprobadores de prd
+# Parametros opcionales:
+#   pythonVersion               : version de Python (default: 3.12)
+# =============================================================================
+
+parameters:
+  - name: bundleName
+    type: string
+  - name: featureMaterializationJob
+    type: string
+  - name: batchScoringJob
+    type: string
+  - name: modelPromotionPrdJob
+    type: string
+  - name: databricksClientId
+    type: string
+  - name: prdVariableGroup
+    type: string
+  - name: prdEnvironment
+    type: string
+  - name: pythonVersion
+    type: string
+    default: '3.12'
+
+stages:
+
+  # ---------------------------------------------------------------------------
+  # Stage 1: DeployPrd — deploy a produccion con aprobacion manual
+  # El bundle se despliega SIN monitor (markers intactos en el repo).
+  # El monitor se activa en Stage 3 despues del primer scoring en prod.
+  # Tambien es aqui, y solo aqui, donde el modelo @champion validado en QA se
+  # copia al catalogo PRD (modelPromotionPrdJob) — con el SP de prod y detras
+  # del mismo gate de aprobacion. El training (cd-training-pipeline) NUNCA
+  # escribe en el catalogo PRD.
+  # ---------------------------------------------------------------------------
+  - stage: DeployPrd
+    displayName: Deploy PRD (aprobacion requerida)
+    condition: eq(variables['Build.SourceBranch'], 'refs/heads/release')
+    jobs:
+      - deployment: DeployPrdJob
+        displayName: Bundle deploy PRD (sin monitor)
+        pool:
+          vmImage: ubuntu-latest
+        environment: ${{ parameters.prdEnvironment }}
+        variables:
+          - group: ${{ parameters.prdVariableGroup }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: UsePythonVersion@0
+                  displayName: Use Python ${{ parameters.pythonVersion }}
+                  inputs:
+                    versionSpec: ${{ parameters.pythonVersion }}
+                    addToPath: true
+
+                - script: |
+                      curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                      python3 scripts/pipeline/exclude_training_prod.py databricks.yml
+                      databricks bundle deploy --target prod
+                      echo "[OK] Bundle PRD desplegado (sin job de training, monitor se activara en RunScoringPrd)"
+                  displayName: Bundle deploy prod (markers intactos — sin monitor)
+                  env:
+                    DATABRICKS_AUTH_TYPE: azure-devops-oidc
+                    DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+                    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+                - script: |
+                      curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                      databricks bundle run ${{ parameters.modelPromotionPrdJob }} --target prod
+                      echo "[OK] Modelo @champion copiado de QA a PRD"
+                  displayName: Promover @champion de QA a PRD (SP prod, post-aprobacion)
+                  env:
+                    DATABRICKS_AUTH_TYPE: azure-devops-oidc
+                    DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+                    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: RunFeatureMaterializationPrd — genera la feature table en PRD
+  # Prerequisito: debe correr ANTES del batch scoring en PRD para que la tabla
+  # fuente exista con datos reales (use_dummy="false" en prod).
+  # ---------------------------------------------------------------------------
+  - stage: RunFeatureMaterializationPrd
+    displayName: Run Feature Materialization PRD
+    dependsOn: DeployPrd
+    condition: succeeded('DeployPrd')
+    jobs:
+      - job: RunFeatureMaterializationPrdJob
+        displayName: Run ${{ parameters.featureMaterializationJob }} (prod)
+        timeoutInMinutes: 120
+        pool:
+          vmImage: ubuntu-latest
+        variables:
+          - group: ${{ parameters.prdVariableGroup }}
+        steps:
+          - task: UsePythonVersion@0
+            displayName: Use Python ${{ parameters.pythonVersion }}
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+              addToPath: true
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                databricks bundle run ${{ parameters.featureMaterializationJob }} --target prod
+                echo "[OK] Feature materialization PRD completada — feature table lista para batch scoring"
+            displayName: Run feature materialization PRD (datos reales)
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: RunScoringPrd — smoke test + enable monitor PRD
+  # Ejecuta scoring en prod (crea _inference prod), luego activa monitor prod.
+  # ---------------------------------------------------------------------------
+  - stage: RunScoringPrd
+    displayName: Run Scoring + Enable Monitor PRD
+    dependsOn: RunFeatureMaterializationPrd
+    condition: succeeded('RunFeatureMaterializationPrd')
+    jobs:
+      - job: RunScoringAndMonitorPrdJob
+        displayName: Scoring PRD + enable monitor
+        timeoutInMinutes: 120
+        pool:
+          vmImage: ubuntu-latest
+        variables:
+          - group: ${{ parameters.prdVariableGroup }}
+        steps:
+          - task: UsePythonVersion@0
+            displayName: Use Python ${{ parameters.pythonVersion }}
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+              addToPath: true
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                databricks bundle run ${{ parameters.batchScoringJob }} --target prod
+                echo "[OK] Batch scoring PRD completado — tabla _inference PRD creada"
+            displayName: Run batch scoring PRD / smoke test (crea tabla _inference)
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+
+                echo "[INFO] Activando quality_monitors PRD en databricks.yml..."
+                python3 scripts/pipeline/enable_monitor.py databricks.yml --target prod
+                python3 scripts/pipeline/exclude_training_prod.py databricks.yml
+
+                echo "[INFO] Re-desplegando bundle PRD con monitor activo..."
+                databricks bundle deploy --target prod
+                echo "[OK] Quality Monitor PRD creado exitosamente"
+            displayName: Enable monitor + redeploy PRD
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)

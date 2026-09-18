@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flight_delay_model"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "mlflow>=2.14",
+    "databricks-sdk>=0.28",
+    "databricks-feature-engineering>=0.6",
+    "scikit-learn>=1.5",
+    "lightgbm>=4.3",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "optuna>=3.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = [
+    "E501",
+    # UP042: Verdict/Hypothesis heredan intencionalmente de (str, Enum) — cambiar a
+    # StrEnum altera str(member) y podria romper la serializacion de tags en MLflow.
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Notebooks Databricks: dbutils/spark/display son globals inyectados en runtime (no
+# definidos en el archivo) y el formato de celdas "# COMMAND ----------" fuerza imports
+# fuera del top del archivo. Ambos son falsos positivos inherentes al formato notebook.
+"**/notebooks/*.py" = ["F821", "E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "compute: requiere cluster Databricks (excluir con -m 'not compute')",
+]

@@ -1,0 +1,190 @@
+# =============================================================================
+# ci-template.yml — Template para CI de productos ML
+# Proyecto : Plantilla ML — BPT
+# =============================================================================
+# Uso: azure-pipelines/ci-pipeline.yml referencia este archivo via `extends`.
+# El proyecto solo declara sus parametros — no duplica logica.
+#
+# Parametros requeridos:
+#   bundleName                : nombre del bundle DAB (coincide con bundle.name en databricks.yml)
+#   trainingJob                : nombre del job de training (resources/model-training-workflow.yml)
+#   featureMaterializationJob  : nombre del job de feature materialization en el bundle
+#                                 (prerequisito de trainingJob — DataPreparation falla si la
+#                                 feature table esta vacia/no existe)
+#   ciVariableGroup            : nombre del variable group de CI en Azure DevOps
+#                                Contiene: DATABRICKS_HOST
+#                                Convencion BPT: mlops-vg-ci
+#   databricksClientId : Application ID (client ID) del Service Principal en Microsoft Entra ID
+#                  Es el mismo SP registrado en Databricks Account Console (azure-devops-oidc)
+# Parametros opcionales:
+#   registeredModel  : nombre completo UC del modelo (catalog.schema.model)
+#                      si vacio, omite limpieza de versiones antes del destroy
+#   pythonVersion    : version de Python (default 3.12)
+# =============================================================================
+
+parameters:
+  - name: bundleName
+    type: string
+  - name: trainingJob
+    type: string
+  - name: featureMaterializationJob
+    type: string
+  - name: ciVariableGroup
+    type: string
+  - name: databricksClientId
+    type: string
+  - name: registeredModel
+    type: string
+    default: ''
+  - name: pythonVersion
+    type: string
+    default: '3.12'
+
+stages:
+
+  # ---------------------------------------------------------------------------
+  # Stage 1: Build — lint + unit tests (sin cluster, ~2 min)
+  # ---------------------------------------------------------------------------
+  - stage: Build
+    displayName: Build
+    jobs:
+      - job: BuildJob
+        displayName: Lint and Unit Tests
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: UsePythonVersion@0
+            displayName: Use Python ${{ parameters.pythonVersion }}
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+              addToPath: true
+
+          - script: pip install -r requirements-dev.txt -e .
+            displayName: Install dependencies
+
+          - script: ruff check src/
+            displayName: Ruff lint
+
+          - script: pytest tests/unit/ -m "not compute" --tb=short
+            displayName: Unit tests (no cluster)
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: ValidateBundle — bundle validate sin desplegar
+  # ---------------------------------------------------------------------------
+  - stage: ValidateBundle
+    displayName: Validate Bundle
+    dependsOn: Build
+    jobs:
+      - job: ValidateBundleJob
+        displayName: Databricks Bundle Validate
+        pool:
+          vmImage: ubuntu-latest
+        variables:
+          - group: ${{ parameters.ciVariableGroup }}
+        steps:
+          - task: UsePythonVersion@0
+            displayName: Use Python ${{ parameters.pythonVersion }}
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+              addToPath: true
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                databricks bundle validate --target test
+            displayName: Bundle validate (target test)
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: IntegrationTests — deploy efimero, run, destroy siempre
+  # ---------------------------------------------------------------------------
+  - stage: IntegrationTests
+    displayName: Integration Tests
+    dependsOn: ValidateBundle
+    jobs:
+      - job: IntegrationJob
+        displayName: Deploy, Run and Destroy
+        pool:
+          vmImage: ubuntu-latest
+        variables:
+          - group: ${{ parameters.ciVariableGroup }}
+        steps:
+          - task: UsePythonVersion@0
+            displayName: Use Python ${{ parameters.pythonVersion }}
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+              addToPath: true
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                databricks bundle deploy --target test
+            displayName: Bundle deploy (target test)
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+          # Prerequisito de trainingJob: DataPreparation lee siempre de la feature table
+          # y falla con ValueError si esta vacia/no existe. Se materializa aqui para que
+          # el test sea autocontenido y no dependa de una corrida previa manual.
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                databricks bundle run ${{ parameters.featureMaterializationJob }} --target test
+            displayName: Run ${{ parameters.featureMaterializationJob }} (target test)
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                databricks bundle run ${{ parameters.trainingJob }} --target test
+            displayName: Run ${{ parameters.trainingJob }} (target test)
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+          # Eliminar versiones del modelo registrado antes del destroy
+          # (Unity Catalog no permite borrar un modelo con versiones activas)
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                if [ -z "$REGISTERED_MODEL" ]; then
+                  echo "registeredModel no configurado — omitiendo limpieza de versiones"
+                else
+                  echo "Eliminando versiones de $REGISTERED_MODEL..."
+                  VERSIONS=$(databricks api get "/api/2.1/unity-catalog/models/$REGISTERED_MODEL/versions" 2>/dev/null \
+                    | python3 -c "import sys,json; print(' '.join(str(v['version']) for v in json.load(sys.stdin).get('model_versions',[])))" \
+                    || echo "")
+                  for V in $VERSIONS; do
+                    databricks api delete "/api/2.1/unity-catalog/models/$REGISTERED_MODEL/versions/$V" \
+                      && echo "  Version $V eliminada" || true
+                  done
+                  echo "Limpieza completada"
+                fi
+            displayName: Cleanup registered model versions
+            condition: always()
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              REGISTERED_MODEL: ${{ parameters.registeredModel }}
+
+          # condition: always() garantiza que se destruye aunque el run falle
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                databricks bundle destroy --target test --auto-approve
+            displayName: Bundle destroy (target test)
+            condition: always()
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)

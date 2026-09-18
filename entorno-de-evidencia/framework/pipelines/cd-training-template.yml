@@ -1,0 +1,216 @@
+# =============================================================================
+# cd-training-template.yml — Pipeline CD de training (Opcion C: branch-gated)
+# Proyecto : flight_delay_model — BPT
+# =============================================================================
+# Responsabilidad: desplegar recursos, materializar features, ejecutar training
+# y dejar QA completamente verificable (scoring + monitor) para que negocio
+# certifique antes del merge a release.
+# Se dispara con push/merge a main. Termina en QA — NO dispara cd-scoring-pipeline.
+# El paso a PRD depende exclusivamente de un merge posterior a la rama release.
+#
+# Parametros requeridos:
+#   bundleName                  : nombre del bundle DAB
+#   featureMaterializationJob   : nombre del job de feature materialization en el bundle
+#   trainingJob                 : nombre del job de training en el bundle
+#   batchScoringJob             : nombre del job de batch scoring en el bundle (Stage 4, QA)
+#   registeredModelStaging      : FQN del modelo en staging (gold_adv_qa.schema.md_model)
+#                                 Usado para resolver @champion actual antes del deploy.
+#   databricksClientId : Application ID (client ID) del Service Principal en Microsoft Entra ID
+#                  Es el mismo SP registrado en Databricks Account Console (azure-devops-oidc)
+#   stagingVariableGroup        : variable group de staging (DATABRICKS_HOST)
+# Parametros opcionales:
+#   stagingTarget               : target DAB de staging (default: qa)
+#   pythonVersion               : version de Python (default: 3.12)
+# =============================================================================
+# NOTA: este pipeline NUNCA escribe en el catalogo PRD. El training y el scoring
+# solo corren en QA. El modelo @champion se copia a PRD desde cd-scoring-pipeline
+# (stage DeployPrd, tras aprobacion manual, con el SP de prod) — ver notebook_promote_prd.py.
+
+parameters:
+  - name: bundleName
+    type: string
+  - name: featureMaterializationJob
+    type: string
+  - name: trainingJob
+    type: string
+  - name: batchScoringJob
+    type: string
+  - name: registeredModelStaging
+    type: string
+  - name: databricksClientId
+    type: string
+  - name: stagingVariableGroup
+    type: string
+  - name: stagingTarget
+    type: string
+    default: qa
+  - name: pythonVersion
+    type: string
+    default: '3.12'
+
+stages:
+
+  # ---------------------------------------------------------------------------
+  # Stage 1: DeployTraining — deploy de recursos de training (sin monitor)
+  # Si el modelo ya existe en UC, resuelve @champion para no regresar a version 1.
+  # ---------------------------------------------------------------------------
+  - stage: DeployTraining
+    displayName: Deploy Training Resources
+    condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+    jobs:
+      - job: DeployTrainingJob
+        displayName: Bundle Deploy (training only)
+        pool:
+          vmImage: ubuntu-latest
+        variables:
+          - group: ${{ parameters.stagingVariableGroup }}
+        steps:
+          - task: UsePythonVersion@0
+            displayName: Use Python ${{ parameters.pythonVersion }}
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+              addToPath: true
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+
+                # Resolver @champion actual para no hacer downgrade si el modelo ya existe.
+                MODEL_FQN="${{ parameters.registeredModelStaging }}"
+                CURRENT_VER=$(databricks api get \
+                  "/api/2.1/unity-catalog/models/${MODEL_FQN}/aliases/champion" 2>/dev/null \
+                  | python3 -c "import sys,json; print(json.load(sys.stdin)['version_num'])" 2>/dev/null) \
+                  || CURRENT_VER="1"
+                echo "[INFO] Desplegando con model_version=${CURRENT_VER} (current @champion o default)"
+
+                databricks bundle deploy \
+                  --target ${{ parameters.stagingTarget }} \
+                  --var model_version=${CURRENT_VER}
+            displayName: Bundle deploy training (${{ parameters.stagingTarget }})
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: RunFeatureMaterialization — genera/actualiza la feature table
+  # Prerequisito obligatorio antes del training: el job de training lee de esta tabla.
+  # ---------------------------------------------------------------------------
+  - stage: RunFeatureMaterialization
+    displayName: Run Feature Materialization
+    dependsOn: DeployTraining
+    condition: succeeded('DeployTraining')
+    jobs:
+      - job: RunFeatureMaterializationJob
+        displayName: Run ${{ parameters.featureMaterializationJob }}
+        timeoutInMinutes: 120
+        pool:
+          vmImage: ubuntu-latest
+        variables:
+          - group: ${{ parameters.stagingVariableGroup }}
+        steps:
+          - task: UsePythonVersion@0
+            displayName: Use Python ${{ parameters.pythonVersion }}
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+              addToPath: true
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                databricks bundle run ${{ parameters.featureMaterializationJob }} --target ${{ parameters.stagingTarget }}
+                echo "[OK] Feature materialization completada — feature table lista para training"
+            displayName: Run ${{ parameters.featureMaterializationJob }} (${{ parameters.stagingTarget }})
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: RunTraining — ejecucion del job de training
+  # Deja el modelo como @champion en QA (S2->S7 QA). Continua con Stage 4 para
+  # dejar QA completamente verificable por negocio (scoring + monitor).
+  # ---------------------------------------------------------------------------
+  - stage: RunTraining
+    displayName: Run Training Job
+    dependsOn: RunFeatureMaterialization
+    condition: succeeded('RunFeatureMaterialization')
+    jobs:
+      - job: RunTrainingJob
+        displayName: Run ${{ parameters.trainingJob }}
+        timeoutInMinutes: 180
+        pool:
+          vmImage: ubuntu-latest
+        variables:
+          - group: ${{ parameters.stagingVariableGroup }}
+        steps:
+          - task: UsePythonVersion@0
+            displayName: Use Python ${{ parameters.pythonVersion }}
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+              addToPath: true
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                databricks bundle run ${{ parameters.trainingJob }} --target ${{ parameters.stagingTarget }}
+                echo "[OK] Training completado — @champion actualizado en QA"
+            displayName: Run ${{ parameters.trainingJob }} (${{ parameters.stagingTarget }})
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+  # ---------------------------------------------------------------------------
+  # Stage 4: RunScoringQA — deja QA completamente verificable por negocio
+  # Ejecuta el batch scoring job en qa (crea tabla _inference), luego activa
+  # el monitor con enable_monitor.py y re-despliega el bundle. Con esto, QA
+  # queda listo para que negocio revise scoring + monitor y certifique el
+  # modelo antes de mergear a release (paso a PRD).
+  # ---------------------------------------------------------------------------
+  - stage: RunScoringQA
+    displayName: Run Scoring + Enable Monitor QA
+    dependsOn: RunTraining
+    condition: succeeded('RunTraining')
+    jobs:
+      - job: RunScoringAndMonitorJob
+        displayName: Scoring QA + enable monitor
+        timeoutInMinutes: 120
+        pool:
+          vmImage: ubuntu-latest
+        variables:
+          - group: ${{ parameters.stagingVariableGroup }}
+        steps:
+          - task: UsePythonVersion@0
+            displayName: Use Python ${{ parameters.pythonVersion }}
+            inputs:
+              versionSpec: ${{ parameters.pythonVersion }}
+              addToPath: true
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+                databricks bundle run ${{ parameters.batchScoringJob }} \
+                  --target ${{ parameters.stagingTarget }}
+                echo "[OK] Batch scoring QA completado — tabla _inference creada"
+            displayName: Run batch scoring QA (crea tabla _inference)
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+
+          - script: |
+                curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+
+                echo "[INFO] Activando quality_monitors QA en databricks.yml..."
+                python3 scripts/pipeline/enable_monitor.py databricks.yml --target ${{ parameters.stagingTarget }}
+
+                echo "[INFO] Re-desplegando bundle con monitor activo..."
+                databricks bundle deploy --target ${{ parameters.stagingTarget }}
+                echo "[OK] Quality Monitor QA creado exitosamente — QA listo para certificacion de negocio"
+            displayName: Enable monitor + redeploy QA
+            env:
+              DATABRICKS_AUTH_TYPE: azure-devops-oidc
+              DATABRICKS_CLIENT_ID: ${{ parameters.databricksClientId }}
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              DATABRICKS_HOST: $(DATABRICKS_HOST)

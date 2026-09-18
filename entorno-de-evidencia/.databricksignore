@@ -1,0 +1,17 @@
+# Archivos de CI/CD — no necesarios en el workspace de Databricks
+azure-pipelines/
+framework/
+
+# Metadata del scaffolding BPT
+openspec/
+
+# Tests unitarios (se ejecutan en el agente de CI, no en el cluster)
+tests/
+
+# Documentación y scripts de inicialización local
+SETUP.md
+init.ps1
+
+# Dependencias de desarrollo
+requirements-dev.txt
+pyproject.toml

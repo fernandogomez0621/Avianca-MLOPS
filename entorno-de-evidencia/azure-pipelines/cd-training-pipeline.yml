@@ -1,0 +1,20 @@
+# Pipeline CD de training — flight_delay_model (Opcion C: branch-gated)
+# Nombre en Azure DevOps: flight_delay_model-cd-training  ← usar exactamente este nombre al registrar
+# Se dispara SOLO con push/merge a main. Este pipeline termina en QA (@champion QA).
+# El paso a PRD lo dispara un merge separado a la rama release (ver cd-scoring-pipeline.yml).
+
+trigger:
+  branches:
+    include:
+      - main
+
+extends:
+  template: ../framework/pipelines/cd-training-template.yml
+  parameters:
+    bundleName:                flight_delay_model
+    featureMaterializationJob: flight_delay_model_feature_materialization_job
+    trainingJob:               flight_delay_model_training_job
+    batchScoringJob:           flight_delay_model_batch_scoring_job
+    registeredModelStaging:    gold_adv_qa.operaciones_flight_delay.md_operaciones_flight
+    databricksClientId:         SERVICE_PRINCIPAL
+    stagingVariableGroup:      mlops-vg-staging

@@ -1,0 +1,27 @@
+resources:
+  jobs:
+    flight_delay_model_batch_scoring_job:
+      name: flight_delay_model_batch_scoring_job_${bundle.target}
+
+      tasks:
+        - task_key: BatchInference
+          notebook_task:
+            notebook_path: ../src/flight_delay_model/deployment/batch_inference/notebooks/BatchInference.py
+            base_parameters:
+              catalog: ${var.catalog_name}
+              schema: ${var.schema_name}
+              model_name: ${var.model_name}
+              workspace_files_path: ${workspace.root_path}/files
+              # Rango alineado al periodo de los datos sinteticos (use_dummy=true).
+              # En produccion se deja vacio para que el notebook use ayer/hoy.
+              start_date: "2024-01-01"
+              end_date: "2024-12-31"
+              # use_dummy eliminado: BatchInference lee siempre desde la feature table.
+              # FeatureMaterialization controla si los datos son dummy o reales (via use_dummy).
+
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"   # TODO: ajustar horario segun necesidad
+        timezone_id: America/Bogota
+        pause_status: UNPAUSED
+
+      max_concurrent_runs: 1

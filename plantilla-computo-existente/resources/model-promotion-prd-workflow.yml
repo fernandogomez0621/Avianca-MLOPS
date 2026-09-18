@@ -1,0 +1,32 @@
+# =============================================================================
+# model-promotion-prd-workflow.yml — Promocion gobernada QA -> PRD
+#
+# Este job NO entrena. Copia el @champion ya validado en QA hacia PRD via
+# copy_model_version, preservando run_id y tags de trazabilidad.
+#
+# GATE: en el pipeline de CD este job se dispara UNICAMENTE despues de la
+# aprobacion manual (environment prd-approval-ops) y con el service principal
+# de PRD. El training esta excluido del target prod precisamente para que
+# ningun modelo llegue a produccion sin pasar por este gate.
+# =============================================================================
+
+resources:
+  jobs:
+    flight_delay_model_model_promotion_prd_job:
+      name: flight_delay_model_model_promotion_prd_job_${bundle.target}
+
+      tasks:
+        - task_key: PromoteChampionToPrd
+          existing_cluster_id: ${var.cluster_id}
+          timeout_seconds: 1800
+          notebook_task:
+            notebook_path: ../src/flight_delay_model/deployment/model_deployment/notebooks/notebook_promote_prd.py
+            base_parameters:
+              src_catalog: ${var.qa_catalog_name}
+              dst_catalog: ${var.catalog_name}
+              src_schema:  ${var.qa_schema_name}
+              dst_schema:  ${var.schema_name}
+              model_name:  ${var.model_name}
+              workspace_files_path: ${workspace.root_path}/files
+
+      max_concurrent_runs: 1
